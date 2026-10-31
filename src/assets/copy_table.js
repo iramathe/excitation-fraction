@@ -1,24 +1,20 @@
 // "Copy table to clipboard" button on the Fluence Table tab.
+// Copies the tab-separated text the server renders into the hidden
+// #table-copy-text element (optional '# ' params header + table), which
+// Excel and Google Sheets paste into separate cells.
 // Runs directly in the click handler (not a Dash callback) so the browser
 // treats it as a user gesture and allows clipboard access in both WebKit
-// (macOS app) and WebView2 (Windows app). Copies tab-separated text, which
-// Excel and Google Sheets paste into separate cells.
+// (macOS app) and WebView2 (Windows app).
 document.addEventListener("click", function (event) {
-  var button = event.target.closest("#copy-table-btn");
-  if (!button) return;
-  var table = document.getElementById("fluence-table");
-  if (!table) return;
-
-  var text = Array.from(table.rows)
-    .map(function (row) {
-      return Array.from(row.cells).map(function (c) { return c.innerText.trim(); }).join("\t");
-    })
-    .join("\n");
+  if (!event.target.closest("#copy-table-btn")) return;
+  var source = document.getElementById("table-copy-text");
+  var text = source ? source.textContent : "";
+  var status = document.getElementById("table-status");
 
   function done(ok) {
-    var status = document.getElementById("table-status");
     if (status) status.innerText = ok ? "Table copied — paste into Excel or Google Sheets." : "Copy failed.";
   }
+  if (!text) { if (status) status.innerText = "Nothing to copy yet."; return; }
 
   function fallback() {
     var area = document.createElement("textarea");

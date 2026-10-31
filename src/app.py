@@ -260,23 +260,31 @@ def _tab3_layout():
                                 inline=True,
                                 className="small",
                             ), width=6),
-                        ], className="mb-3 align-items-center"),
+                        ], className="mb-2 align-items-center"),
+                        dbc.Checkbox(
+                            id="input-table-params",
+                            label="Include params in output",
+                            value=False,
+                            className="small mb-3",
+                        ),
                         dbc.Button("Copy table to clipboard", id="copy-table-btn",
                                    color="primary", size="sm", className="w-100 mb-2"),
                         dbc.Button("Save as CSV…", id="save-csv-btn",
                                    color="secondary", size="sm", className="w-100"),
                         html.Div(id="table-status", className="text-success small mt-2"),
                     ]),
-                ], className="mb-3"),
-                dbc.Card([
-                    dbc.CardHeader("Using", className="fw-bold"),
-                    dbc.CardBody(html.Div(id="table-inputs-summary",
-                                          className="text-light small")),
                 ]),
             ], width=4),
-            # Right: the table itself (plain HTML so mouse-select + copy works)
-            dbc.Col(html.Div(id="fluence-table-container"), width=8),
+            # Right: optional params header + the table itself (plain HTML so
+            # mouse-select + copy works)
+            dbc.Col([
+                html.Pre(id="table-params-header", className="text-light small"),
+                html.Div(id="fluence-table-container"),
+            ], width=8),
         ]),
+        # Exact text the copy button puts on the clipboard (read by
+        # assets/copy_table.js), kept hidden.
+        html.Pre(id="table-copy-text", style={"display": "none"}),
         dcc.Download(id="download-csv"),
     ], fluid=True, className="mt-3")
 
@@ -693,6 +701,42 @@ def _table_rows(shared, wavelength_nm, spot_v, spot_h, rep_rate,
             for pct, fluence, energy in rows]
 
 
+def _params_header(shared, wavelength_nm, spot_v, spot_h) -> list[str]:
+    """
+    '# '-commented lines with every input the table depends on, so the
+    calculation can be reproduced from the exported file alone.
+    """
+    from datetime import datetime
+
+    def num(x) -> str:
+        return f"{float(x):.12g}"
+
+    return [
+        "# Excitation fraction table (Sample & Laser Calculations)",
+        f"# Generated: {datetime.now().isoformat(timespec='seconds')}",
+        f"# Sample: {shared['sample_name']}",
+        f"# Solvent: {shared['solvent_ratio']}",
+        f"# Extinction coefficient (M^-1 cm^-1): {num(shared['extinction_coeff'])}",
+        f"# Absorbance (OD): {num(shared['target_absorbance'])}",
+        f"# Wavelength (nm): {num(wavelength_nm)}",
+        f"# Spot size vertical (um FWHM): {num(spot_v)}",
+        f"# Spot size horizontal (um FWHM): {num(spot_h)}",
+        "# Model: <fexc> = sigma * F_mid, sigma = eps * 1000 * ln(10) / N_A,",
+        "#   F_mid = (E_pulse / E_photon) / A_beam * 10^(-OD/2) (photons/cm^2),",
+        "#   A_beam = pi * (FWHM_v/2) * (FWHM_h/2), fluence = E_pulse / A_beam",
+    ]
+
+
+def _table_text(rows, header_lines, delimiter) -> str:
+    """Header comments (if any) + column names + rows, as delimited text."""
+    buf = io.StringIO()
+    for line in header_lines:
+        buf.write(line + "\n")
+    csv.writer(buf, delimiter=delimiter, lineterminator="\n").writerows(
+        [_TABLE_HEADERS] + rows)
+    return buf.getvalue()
+
+
 _TABLE_INPUTS = [
     Input("shared-state", "data"),
     Input("input-wavelength", "value"),
@@ -701,22 +745,28 @@ _TABLE_INPUTS = [
     Input("input-rep-rate", "value"),
     Input("input-table-decimals", "value"),
     Input("input-table-style", "value"),
+    Input("input-table-params", "value"),
 ]
 
 
 @app.callback(
     Output("fluence-table-container", "children"),
-    Output("table-inputs-summary", "children"),
+    Output("table-params-header", "children"),
+    Output("table-copy-text", "children"),
     *_TABLE_INPUTS,
 )
-def update_tab3(shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style):
+def update_tab3(shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style,
+                include_params):
     try:
         rows = _table_rows(shared, wavelength_nm, spot_v, spot_h, rep_rate,
                            decimals, style)
     except Exception as exc:
-        return html.Div(f"Error: {exc}", className="text-danger"), "—"
+        return html.Div(f"Error: {exc}", className="text-danger"), "", ""
     if rows is None:
-        return html.Div("Waiting for inputs…", className="text-secondary"), "—"
+        return html.Div("Waiting for inputs…", className="text-secondary"), "", ""
+
+    header = (_params_header(shared, wavelength_nm, spot_v, spot_h)
+              if include_params else [])
 
     table = dbc.Table(
         [html.Thead(html.Tr([html.Th(h) for h in _TABLE_HEADERS])),
@@ -726,13 +776,8 @@ def update_tab3(shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style
         color="dark",
         className="text-end",
     )
-    summary = [
-        html.Div(f"Sample: {shared['sample_name']}"),
-        html.Div(f"Absorbance (OD): {shared['target_absorbance']:.4f}"),
-        html.Div(f"Wavelength: {float(wavelength_nm):g} nm"),
-        html.Div(f"Spot size: {float(spot_v):g} × {float(spot_h):g} µm FWHM"),
-    ]
-    return table, summary
+    # Tab-separated: Excel / Google Sheets paste it into separate cells.
+    return table, "\n".join(header), _table_text(rows, header, "\t")
 
 
 def _desktop_window():
@@ -751,14 +796,15 @@ def _desktop_window():
     *[State(i.component_id, i.component_property) for i in _TABLE_INPUTS],
     prevent_initial_call=True,
 )
-def save_csv(n_clicks, shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style):
+def save_csv(n_clicks, shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style,
+             include_params):
     rows = _table_rows(shared, wavelength_nm, spot_v, spot_h, rep_rate,
                        decimals, style)
     if rows is None:
         return no_update, "Nothing to save yet."
-    buf = io.StringIO()
-    csv.writer(buf, lineterminator="\n").writerows([_TABLE_HEADERS] + rows)
-    text = buf.getvalue()
+    header = (_params_header(shared, wavelength_nm, spot_v, spot_h)
+              if include_params else [])
+    text = _table_text(rows, header, ",")
     stem = re.sub(r"[^\w]+", "_", shared["sample_name"]).strip("_") or "sample"
     filename = f"fluence_table_{stem}.csv"
 
