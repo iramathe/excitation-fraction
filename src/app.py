@@ -15,19 +15,24 @@ Layout
 - Top bar: config dropdown (load) + name input / save button
 - Tab 1 — Sample Concentration: inputs → results card + OD vs. concentration plot
 - Tab 2 — Laser Fluence: inputs → results card + 2x2 plot grid
+- Tab 3 — Fluence Table: fluence / pulse energy for <fexc> = 5 … 200 %, with
+  copy-to-clipboard (assets/copy_table.js) and save-as-CSV
 
 Shared state (SampleConfig fields + target_absorbance) flows from Tab 1 to Tab 2
 via a dcc.Store component, eliminating the manual-copy problem from the spreadsheet.
 """
 
+import csv
+import io
 import pathlib
+import re
 
 import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, html, Input, Output, State, callback, no_update
 
 from .models import SampleConfig
-from .calculations import calculate_concentration, calculate_fluence
+from .calculations import calculate_concentration, calculate_fluence, fluence_table
 from .plots import (
     plot_od_vs_concentration,
     plot_fexc_vs_depth,
@@ -229,6 +234,53 @@ def _tab2_layout():
     ], fluid=True, className="mt-3")
 
 
+_TABLE_HEADERS = ["Excitation Fraction (%)", "Fluence (mJ/cm^2)", "Pulse Energy (µJ)"]
+
+
+def _tab3_layout():
+    return dbc.Container([
+        dbc.Row([
+            # Left: display options + export buttons
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Table Options", className="fw-bold"),
+                    dbc.CardBody([
+                        _input_row("Decimal places", "input-table-decimals", 2,
+                                   step=1, min_val=0),
+                        dbc.Row([
+                            dbc.Col(html.Label("Style", className="text-light small"),
+                                    width=6),
+                            dbc.Col(dbc.RadioItems(
+                                id="input-table-style",
+                                options=[
+                                    {"label": "Decimal", "value": "decimal"},
+                                    {"label": "Scientific", "value": "scientific"},
+                                ],
+                                value="decimal",
+                                inline=True,
+                                className="small",
+                            ), width=6),
+                        ], className="mb-3 align-items-center"),
+                        dbc.Button("Copy table to clipboard", id="copy-table-btn",
+                                   color="primary", size="sm", className="w-100 mb-2"),
+                        dbc.Button("Save as CSV…", id="save-csv-btn",
+                                   color="secondary", size="sm", className="w-100"),
+                        html.Div(id="table-status", className="text-success small mt-2"),
+                    ]),
+                ], className="mb-3"),
+                dbc.Card([
+                    dbc.CardHeader("Using", className="fw-bold"),
+                    dbc.CardBody(html.Div(id="table-inputs-summary",
+                                          className="text-light small")),
+                ]),
+            ], width=4),
+            # Right: the table itself (plain HTML so mouse-select + copy works)
+            dbc.Col(html.Div(id="fluence-table-container"), width=8),
+        ]),
+        dcc.Download(id="download-csv"),
+    ], fluid=True, className="mt-3")
+
+
 # ---------------------------------------------------------------------------
 # Overwrite confirmation modal
 # ---------------------------------------------------------------------------
@@ -322,6 +374,8 @@ app.layout = dbc.Container([
                 tab_id="tab-1", activeTabClassName="fw-bold"),
         dbc.Tab(_tab2_layout(), label="Laser Fluence",
                 tab_id="tab-2", activeTabClassName="fw-bold"),
+        dbc.Tab(_tab3_layout(), label="Fluence Table",
+                tab_id="tab-3", activeTabClassName="fw-bold"),
     ], id="main-tabs", active_tab="tab-1"),
 
 ], fluid=True)
@@ -603,6 +657,127 @@ def update_tab2(
         fig_fluence,
         fig_od,
     )
+
+
+# ---------------------------------------------------------------------------
+# Callback 2b — Tab 3: fluence table
+# ---------------------------------------------------------------------------
+
+def _format_number(value: float, decimals: int, style: str) -> str:
+    """Format like numpy: 12.35 (decimal) or 1.235e+01 (scientific)."""
+    return f"{value:.{decimals}e}" if style == "scientific" else f"{value:.{decimals}f}"
+
+
+def _table_rows(shared, wavelength_nm, spot_v, spot_h, rep_rate,
+                decimals, style) -> list[list[str]] | None:
+    """Formatted table rows (strings), or None if inputs are incomplete."""
+    if shared is None or any(v is None for v in
+                             (wavelength_nm, spot_v, spot_h, rep_rate, decimals)):
+        return None
+    config = SampleConfig(
+        sample_name=shared["sample_name"],
+        extinction_coeff=shared["extinction_coeff"],
+        molecular_weight=shared["molecular_weight"],
+        solvent_ratio=shared["solvent_ratio"],
+    )
+    rows = fluence_table(
+        config,
+        target_absorbance=shared["target_absorbance"],
+        wavelength_nm=float(wavelength_nm),
+        spot_size_v_um=float(spot_v),
+        spot_size_h_um=float(spot_h),
+        rep_rate_Hz=float(rep_rate),
+    )
+    n = max(0, min(int(decimals), 12))
+    return [[f"{pct:g}", _format_number(fluence, n, style), _format_number(energy, n, style)]
+            for pct, fluence, energy in rows]
+
+
+_TABLE_INPUTS = [
+    Input("shared-state", "data"),
+    Input("input-wavelength", "value"),
+    Input("input-spot-v", "value"),
+    Input("input-spot-h", "value"),
+    Input("input-rep-rate", "value"),
+    Input("input-table-decimals", "value"),
+    Input("input-table-style", "value"),
+]
+
+
+@app.callback(
+    Output("fluence-table-container", "children"),
+    Output("table-inputs-summary", "children"),
+    *_TABLE_INPUTS,
+)
+def update_tab3(shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style):
+    try:
+        rows = _table_rows(shared, wavelength_nm, spot_v, spot_h, rep_rate,
+                           decimals, style)
+    except Exception as exc:
+        return html.Div(f"Error: {exc}", className="text-danger"), "—"
+    if rows is None:
+        return html.Div("Waiting for inputs…", className="text-secondary"), "—"
+
+    table = dbc.Table(
+        [html.Thead(html.Tr([html.Th(h) for h in _TABLE_HEADERS])),
+         html.Tbody([html.Tr([html.Td(c) for c in row]) for row in rows])],
+        id="fluence-table",
+        bordered=True, striped=True, hover=True, size="sm",
+        color="dark",
+        className="text-end",
+    )
+    summary = [
+        html.Div(f"Sample: {shared['sample_name']}"),
+        html.Div(f"Absorbance (OD): {shared['target_absorbance']:.4f}"),
+        html.Div(f"Wavelength: {float(wavelength_nm):g} nm"),
+        html.Div(f"Spot size: {float(spot_v):g} × {float(spot_h):g} µm FWHM"),
+    ]
+    return table, summary
+
+
+def _desktop_window():
+    """The pywebview window when running in the desktop app, else None."""
+    try:
+        import webview
+    except ImportError:
+        return None
+    return webview.windows[0] if webview.windows else None
+
+
+@app.callback(
+    Output("download-csv", "data"),
+    Output("table-status", "children"),
+    Input("save-csv-btn", "n_clicks"),
+    *[State(i.component_id, i.component_property) for i in _TABLE_INPUTS],
+    prevent_initial_call=True,
+)
+def save_csv(n_clicks, shared, wavelength_nm, spot_v, spot_h, rep_rate, decimals, style):
+    rows = _table_rows(shared, wavelength_nm, spot_v, spot_h, rep_rate,
+                       decimals, style)
+    if rows is None:
+        return no_update, "Nothing to save yet."
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerows([_TABLE_HEADERS] + rows)
+    text = buf.getvalue()
+    stem = re.sub(r"[^\w]+", "_", shared["sample_name"]).strip("_") or "sample"
+    filename = f"fluence_table_{stem}.csv"
+
+    window = _desktop_window()
+    if window is None:
+        # Plain browser (python -m src.app): let the browser download it.
+        return dict(content=text, filename=filename), ""
+
+    import webview
+    paths = window.create_file_dialog(
+        webview.FileDialog.SAVE, save_filename=filename,
+        file_types=("CSV files (*.csv)",),
+    )
+    if not paths:
+        return no_update, ""
+    path = paths if isinstance(paths, str) else paths[0]
+    # utf-8-sig: the BOM makes Excel read "µ" correctly.
+    pathlib.Path(path).write_text(text, encoding="utf-8-sig")
+    return no_update, f"Saved {pathlib.Path(path).name}"
 
 
 # ---------------------------------------------------------------------------

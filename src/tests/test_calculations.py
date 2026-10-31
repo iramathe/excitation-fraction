@@ -182,3 +182,27 @@ class TestEdgeCases:
         assert fluence_result.avg_power_uW == pytest.approx(
             fluence_result.avg_power_mW * 1000.0, rel=1e-10
         )
+
+
+# ---------------------------------------------------------------------------
+# Tab 3 — fluence_table
+# ---------------------------------------------------------------------------
+
+def test_fluence_table_rows(default_config, fluence_result):
+    from src.calculations import fluence_table
+
+    rows = fluence_table(
+        default_config,
+        target_absorbance=0.025,
+        wavelength_nm=393.0,
+        spot_size_v_um=240.0,
+        spot_size_h_um=100.0,
+        rep_rate_Hz=33000.0,
+    )
+    assert [r[0] for r in rows] == list(range(5, 201, 5))
+    # Fluence and pulse energy are linear in fexc; compare the 25 % row with
+    # the fixture computed at fexc = 0.24.
+    pct, fluence, energy = rows[4]  # 25 %
+    assert pct == 25
+    assert fluence == pytest.approx(fluence_result.fluence_mJ_cm2 * 25 / 24, rel=1e-9)
+    assert energy == pytest.approx(fluence_result.pulse_energy_uJ * 25 / 24, rel=1e-9)

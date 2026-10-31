@@ -12,7 +12,13 @@ calculate_concentration(config, jet_diameter_um, reservoir_volume_mL, target_abs
 calculate_fluence(config, target_absorbance, wavelength_nm, spot_size_v_um,
                   spot_size_h_um, rep_rate_Hz, target_fexc, pulse_duration_s)
     -> FluenceResult
+
+fluence_table(config, target_absorbance, wavelength_nm, spot_size_v_um,
+              spot_size_h_um, rep_rate_Hz, fexc_percents=None)
+    -> list of [fexc_percent, fluence_mJ_cm2, pulse_energy_uJ] rows
 """
+
+from __future__ import annotations
 
 import math
 
@@ -172,3 +178,45 @@ def calculate_fluence(
         peak_intensity_W_cm2=peak_intensity_W_cm2,
         pulse_duration_s=pulse_duration_s,
     )
+
+
+def fluence_table(
+    config: SampleConfig,
+    target_absorbance: float,
+    wavelength_nm: float,
+    spot_size_v_um: float,
+    spot_size_h_um: float,
+    rep_rate_Hz: float,
+    fexc_percents: list[float] | None = None,
+) -> list[list[float]]:
+    """
+    Tabulate fluence and pulse energy over a range of target excitation
+    fractions (Tab 3).
+
+    Parameters
+    ----------
+    config, target_absorbance, wavelength_nm, spot_size_v_um, spot_size_h_um,
+    rep_rate_Hz
+        As for calculate_fluence().
+    fexc_percents : list of float, optional
+        Target <fexc> values in percent. Default: 5, 10, ..., 200.
+
+    Returns
+    -------
+    list of [fexc_percent, fluence_mJ_cm2, pulse_energy_uJ] rows.
+    """
+    if fexc_percents is None:
+        fexc_percents = list(range(5, 201, 5))
+    rows = []
+    for pct in fexc_percents:
+        result = calculate_fluence(
+            config,
+            target_absorbance=target_absorbance,
+            wavelength_nm=wavelength_nm,
+            spot_size_v_um=spot_size_v_um,
+            spot_size_h_um=spot_size_h_um,
+            rep_rate_Hz=rep_rate_Hz,
+            target_fexc=pct / 100.0,
+        )
+        rows.append([pct, result.fluence_mJ_cm2, result.pulse_energy_uJ])
+    return rows
